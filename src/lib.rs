@@ -6,12 +6,18 @@ use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LazyOption, LookupMap};
 use near_sdk::json_types::U128;
 use near_sdk::{
-    env, log, near_bindgen, require, AccountId, Balance, BorshStorageKey, PanicOnDefault,
-    PromiseOrValue,
+    env, log, near_bindgen, require, AccountId, Balance, BorshStorageKey, PanicOnDefault, Promise,
+    PromiseOrValue, PublicKey,
 };
+use serde::{Deserialize, Serialize};
 
 // TODO
-type AccountIdOrKey = AccountId;
+#[derive(Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
+#[serde(tag = "type")]
+pub enum AccountIdOrKey {
+    Account(AccountId),
+    Key(PublicKey),
+}
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
@@ -75,6 +81,83 @@ impl Contract {
 
     fn on_tokens_burned(&mut self, account_id: AccountId, amount: Balance) {
         log!("Account @{} burned {}", account_id, amount);
+    }
+
+    // ---- Approval standard -----
+
+    /// Approve the passed address to spend the specified amount of tokens on behalf of
+    /// `env::predecessor_account_id`.
+    ///
+    /// Arguments:
+    /// * `spender` The address which will spend the funds.
+    /// * `current_value` The amount of tokens currently allowed. This is used to ensure atomicity.
+    /// * `value` The amount of tokens to be spent.
+    #[payable]
+    pub fn ft_approve(&mut self, spender: AccountIdOrKey, current_value: U128, value: U128) {
+        let attached_deposit = env::attached_deposit();
+        // Assert that there is a deposit for the transaction for security.
+        // This deposit is used for access key allowance if approving using a key.
+        require!(attached_deposit >= 1);
+
+        let predecessor = env::predecessor_account_id();
+        match &spender {
+            AccountIdOrKey::Account(a) => {
+                // Ensure that the approval is not given to the same account as the owner.
+                require!(a != &predecessor);
+            }
+            AccountIdOrKey::Key(k) => {
+                let current_account = env::current_account_id();
+                // TODO this can be optimized by avoiding Promise API.
+                Promise::new(current_account.clone()).add_access_key(
+                    k.clone(),
+                    attached_deposit,
+                    current_account,
+                    "ft_transfer_from,ft_transfer_call_from".to_string(),
+                );
+            }
+        }
+
+        let lookup = (predecessor, spender);
+        let prev = self.approvals.get(&lookup);
+
+        // Compare previous value before updating.
+        require!(prev.unwrap_or_default() == current_value.0);
+
+        // Update allowance to new value.
+        self.approvals.insert(&lookup, &value.0);
+
+        // TODO emit approval event
+    }
+
+    // // TODO docs
+    // pub fn ft_approve_key(
+    //     &mut self,
+    //     key: PublicKey,
+    //     allowance: U128,
+    //     current_value: U128,
+    //     value: U128,
+    // ) {
+    // }
+
+    pub fn ft_transfer_from(&mut self, from: AccountId, to: AccountId, amount: U128) {}
+
+    pub fn ft_transfer_call_from(
+        &mut self,
+        from: AccountId,
+        to: AccountId,
+        amount: U128,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        todo!()
+    }
+
+    pub fn ft_resolve_transfer_from(&mut self) -> U128 {
+        todo!()
+    }
+
+    pub fn ft_allowance(&self, owner: AccountId, spender: AccountIdOrKey) -> U128 {
+        todo!()
     }
 }
 

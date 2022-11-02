@@ -12,7 +12,8 @@ near-contract-standards = "4.1.0-pre.3"
 serde = "1.0"
 
 [dev-dependencies]
-workspaces = { version = "0.6.0", features = ["unstable"] }
+# workspaces = { version = "0.6.0", features = ["unstable"] }
+workspaces = { git = "https://github.com/near/workspaces-rs", rev = "0b80d06eead379e8717828b5422bab1248130024", features = ["unstable"] }
 serde_json = "1.0"
 tokio = { version = "1.14", features = ["full"] }
 anyhow = "1.0"

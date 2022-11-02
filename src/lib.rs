@@ -289,8 +289,14 @@ impl Contract {
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<U128> {
+        const GAS_FOR_RESOLVE_TRANSFER: Gas = Gas(5_000_000_000_000);
         // TODO decide if ==1 or >=1
         require!(env::attached_deposit() == 1);
+        // TODO Could be a better estimation to avoid using unnecessary gas.
+        require!(
+            env::prepaid_gas() > GAS_FOR_RESOLVE_TRANSFER,
+            "More gas is required"
+        );
 
         let lookup = (sender_id, spender);
         let allowed_amount = self.approvals.get(&lookup).unwrap();
@@ -312,7 +318,7 @@ impl Contract {
             .then(
                 Self::ext(env::current_account_id())
                     // TODO figure out reasonable static gas to ensure callback succeeds
-                    .with_static_gas(Gas(5_000_000_000_000))
+                    .with_static_gas(GAS_FOR_RESOLVE_TRANSFER)
                     .ft_resolve_transfer_from(spender, sender_id, receiver_id, amount.into()),
             )
             .into()
@@ -401,6 +407,8 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod ws_tests {
+    use std::future::IntoFuture;
+
     use super::AccountIdOrKey;
     use near_sdk::json_types::U128;
     use near_sdk::ONE_YOCTO;
@@ -565,7 +573,7 @@ mod ws_tests {
     }
 
     #[tokio::test]
-    async fn simulate_close_account_force_non_empty_balance() -> anyhow::Result<()> {
+    async fn test_close_account_force_non_empty_balance() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
         let worker = workspaces::sandbox().await?;
         let contract = init(&worker, initial_balance).await?;
@@ -586,7 +594,7 @@ mod ws_tests {
     }
 
     #[tokio::test]
-    async fn simulate_transfer_call_with_burned_amount() -> anyhow::Result<()> {
+    async fn test_transfer_call_with_burned_amount() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
         let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
@@ -626,8 +634,6 @@ mod ws_tests {
         assert!(logs.contains(&"The account of the sender was deleted"));
         assert!(logs.contains(&(expected.as_str())));
 
-        // TODO: replace the following manual value extraction when workspaces
-        // resolves https://github.com/near/workspaces-rs/issues/201
         match res.receipt_outcomes()[5].clone().into_result()? {
             ValueOrReceiptId::Value(val) => {
                 let used_amount: U128 = val.json()?;
@@ -651,7 +657,7 @@ mod ws_tests {
     }
 
     #[tokio::test]
-    async fn simulate_transfer_call_with_immediate_return_and_no_refund() -> anyhow::Result<()> {
+    async fn test_transfer_call_with_immediate_return_and_no_refund() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
         let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
@@ -695,8 +701,8 @@ mod ws_tests {
     }
 
     #[tokio::test]
-    async fn simulate_transfer_call_when_called_contract_not_registered_with_ft(
-    ) -> anyhow::Result<()> {
+    async fn test_transfer_call_when_called_contract_not_registered_with_ft() -> anyhow::Result<()>
+    {
         let initial_balance = U128(10000);
         let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
@@ -738,7 +744,7 @@ mod ws_tests {
     }
 
     #[tokio::test]
-    async fn simulate_transfer_call_with_promise_and_refund() -> anyhow::Result<()> {
+    async fn test_transfer_call_with_promise_and_refund() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
         let refund_amount = U128(50);
         let transfer_amount = U128(100);
@@ -785,7 +791,7 @@ mod ws_tests {
     }
 
     #[tokio::test]
-    async fn simulate_transfer_call_promise_panics_for_a_full_refund() -> anyhow::Result<()> {
+    async fn test_transfer_call_promise_panics_for_a_full_refund() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
         let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
@@ -855,13 +861,13 @@ mod ws_tests {
             .args_json((alice.id(), alice_amount, Option::<bool>::None))
             .max_gas()
             .deposit(ONE_YOCTO)
-            .transact()
+            .transact_async()
             .await?;
-        assert!(res.is_success());
+        assert!(res.status().await.is_ok());
 
         let new_account = worker.dev_create_account().await?;
 
-        let res = alice
+        let f1 = alice
             .call(contract.id(), "ft_approve")
             .args_json((
                 AccountIdOrKey::Account(new_account.id().as_str().parse().unwrap()),
@@ -869,13 +875,12 @@ mod ws_tests {
                 approve_amount,
             ))
             .deposit(ONE_YOCTO)
-            .transact()
+            .transact_async()
             .await?;
-        assert!(res.is_success());
 
         let access_pk = SecretKey::from_random(KeyType::ED25519);
 
-        let res = alice
+        let f2 = alice
             .call(contract.id(), "ft_approve")
             .args_json((
                 serde_json::json!({"type": "Key", "value": access_pk.public_key()}),
@@ -884,9 +889,11 @@ mod ws_tests {
             ))
             // TODO play with deposit
             .deposit(parse_near!("1 N"))
-            .transact()
+            .transact_async()
             .await?;
-        assert!(res.is_success());
+        let (r1, r2) = tokio::join!(f1.into_future(), f2.into_future());
+        r1?.into_result()?;
+        r2?.into_result()?;
 
         // Ensure balances have not changed from approvals
         let root_balance = contract
@@ -930,7 +937,7 @@ mod ws_tests {
 
         let receiver_account = create_and_register_user(&contract, &worker).await?;
 
-        let res = access_signer
+        let f1 = access_signer
             .call(contract.id(), "ft_transfer_from_key")
             .args_json((
                 alice.id(),
@@ -938,11 +945,10 @@ mod ws_tests {
                 approve_transfer_amount,
                 "test memo",
             ))
-            .transact()
+            .transact_async()
             .await?;
-        res.into_result()?;
 
-        new_account
+        let f2 = new_account
             .call(contract.id(), "ft_transfer_from_account")
             .args_json((
                 alice.id(),
@@ -950,9 +956,15 @@ mod ws_tests {
                 approve_transfer_amount,
                 "test acc",
             ))
-            .transact()
-            .await?
-            .into_result()?;
+            .transact_async()
+            .await?;
+
+        println!("pre join");
+        let (r1, r2) = tokio::join!(f1.into_future(), f2.into_future());
+        println!("post join");
+
+        r1?.into_result()?;
+        r2?.into_result()?;
 
         let alice_balance = contract
             .call("ft_balance_of")
@@ -971,6 +983,259 @@ mod ws_tests {
             alice_balance.0
         );
         assert_eq!(approve_transfer_amount.0 * 2, receiver_balance.0);
+
+        Ok(())
+    }
+
+    // TODO is dependent on async
+    #[tokio::test]
+    async fn test_transfer_call_from_with_burned_amount() -> anyhow::Result<()> {
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
+        let worker = workspaces::sandbox().await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
+
+        // defi contract must be registered as a FT account
+        register_user(&contract, defi_contract.id()).await?;
+
+        // root invests in defi by calling `ft_transfer_call`
+        let res = contract
+            .batch()
+            .call(
+                Function::new("ft_transfer_call")
+                    .args_json((
+                        defi_contract.id(),
+                        transfer_amount,
+                        Option::<String>::None,
+                        "10",
+                    ))
+                    .deposit(ONE_YOCTO)
+                    .gas(300_000_000_000_000 / 2),
+            )
+            .call(
+                Function::new("storage_unregister")
+                    .args_json((Some(true),))
+                    .deposit(ONE_YOCTO)
+                    .gas(300_000_000_000_000 / 2),
+            )
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        let logs = res.logs();
+        let expected = format!("Account @{} burned {}", contract.id(), 10);
+        assert!(logs.len() >= 2);
+        assert!(logs.contains(&"The account of the sender was deleted"));
+        assert!(logs.contains(&(expected.as_str())));
+
+        match res.receipt_outcomes()[5].clone().into_result()? {
+            ValueOrReceiptId::Value(val) => {
+                let used_amount: U128 = val.json()?;
+                assert_eq!(used_amount, transfer_amount);
+            }
+            _ => panic!("Unexpected receipt id"),
+        }
+        assert!(res.json::<bool>()?);
+
+        let res = contract.call("ft_total_supply").view().await?;
+        assert_eq!(res.json::<U128>()?.0, transfer_amount.0 - 10);
+        let defi_balance = contract
+            .call("ft_balance_of")
+            .args_json((defi_contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(defi_balance.0, transfer_amount.0 - 10);
+
+        Ok(())
+    }
+
+    // TODO
+    #[tokio::test]
+    async fn test_transfer_call_from_with_immediate_return_and_no_refund() -> anyhow::Result<()> {
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
+        let worker = workspaces::sandbox().await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
+
+        // defi contract must be registered as a FT account
+        register_user(&contract, defi_contract.id()).await?;
+
+        // root invests in defi by calling `ft_transfer_call`
+        let res = contract
+            .call("ft_transfer_call")
+            .args_json((
+                defi_contract.id(),
+                transfer_amount,
+                Option::<String>::None,
+                "take-my-money",
+            ))
+            .max_gas()
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        let root_balance = contract
+            .call("ft_balance_of")
+            .args_json((contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        let defi_balance = contract
+            .call("ft_balance_of")
+            .args_json((defi_contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(initial_balance.0 - transfer_amount.0, root_balance.0);
+        assert_eq!(transfer_amount.0, defi_balance.0);
+
+        Ok(())
+    }
+
+    // TODO
+    #[tokio::test]
+    async fn test_transfer_call_from_when_called_contract_not_registered_with_ft(
+    ) -> anyhow::Result<()> {
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
+        let worker = workspaces::sandbox().await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
+
+        // call fails because DEFI contract is not registered as FT user
+        let res = contract
+            .call("ft_transfer_call")
+            .args_json((
+                defi_contract.id(),
+                transfer_amount,
+                Option::<String>::None,
+                "take-my-money",
+            ))
+            .max_gas()
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res.is_failure());
+
+        // balances remain unchanged
+        let root_balance = contract
+            .call("ft_balance_of")
+            .args_json((contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        let defi_balance = contract
+            .call("ft_balance_of")
+            .args_json((defi_contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(initial_balance.0, root_balance.0);
+        assert_eq!(0, defi_balance.0);
+
+        Ok(())
+    }
+
+    // TODO
+    #[tokio::test]
+    async fn test_transfer_call_from_with_promise_and_refund() -> anyhow::Result<()> {
+        let initial_balance = U128(10000);
+        let refund_amount = U128(50);
+        let transfer_amount = U128(100);
+        let worker = workspaces::sandbox().await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
+
+        // defi contract must be registered as a FT account
+        register_user(&contract, defi_contract.id()).await?;
+
+        let res = contract
+            .call("ft_transfer_call")
+            .args_json((
+                defi_contract.id(),
+                transfer_amount,
+                Option::<String>::None,
+                refund_amount.0.to_string(),
+            ))
+            .max_gas()
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        let root_balance = contract
+            .call("ft_balance_of")
+            .args_json((contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        let defi_balance = contract
+            .call("ft_balance_of")
+            .args_json((defi_contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(
+            initial_balance.0 - transfer_amount.0 + refund_amount.0,
+            root_balance.0
+        );
+        assert_eq!(transfer_amount.0 - refund_amount.0, defi_balance.0);
+
+        Ok(())
+    }
+
+    // TODO
+    #[tokio::test]
+    async fn test_transfer_call_from_promise_panics_for_a_full_refund() -> anyhow::Result<()> {
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
+        let worker = workspaces::sandbox().await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
+
+        // defi contract must be registered as a FT account
+        register_user(&contract, defi_contract.id()).await?;
+
+        // root invests in defi by calling `ft_transfer_call`
+        let res = contract
+            .call("ft_transfer_call")
+            .args_json((
+                defi_contract.id(),
+                transfer_amount,
+                Option::<String>::None,
+                "no parsey as integer big panic oh no".to_string(),
+            ))
+            .max_gas()
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        let promise_failures = res.receipt_failures();
+        assert_eq!(promise_failures.len(), 1);
+        let failure = promise_failures[0].clone().into_result();
+        let err = failure.unwrap_err();
+        assert!(err.to_string().contains("ParseIntError"));
+
+        // balances remain unchanged
+        let root_balance = contract
+            .call("ft_balance_of")
+            .args_json((contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        let defi_balance = contract
+            .call("ft_balance_of")
+            .args_json((defi_contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(initial_balance, root_balance);
+        assert_eq!(0, defi_balance.0);
 
         Ok(())
     }

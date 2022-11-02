@@ -290,8 +290,6 @@ impl Contract {
         msg: String,
     ) -> PromiseOrValue<U128> {
         const GAS_FOR_RESOLVE_TRANSFER: Gas = Gas(5_000_000_000_000);
-        // TODO decide if ==1 or >=1
-        require!(env::attached_deposit() == 1);
         // TODO Could be a better estimation to avoid using unnecessary gas.
         require!(
             env::prepaid_gas() > GAS_FOR_RESOLVE_TRANSFER,
@@ -937,7 +935,7 @@ mod ws_tests {
 
         let receiver_account = create_and_register_user(&contract, &worker).await?;
 
-        let f1 = access_signer
+        access_signer
             .call(contract.id(), "ft_transfer_from_key")
             .args_json((
                 alice.id(),
@@ -945,10 +943,11 @@ mod ws_tests {
                 approve_transfer_amount,
                 "test memo",
             ))
-            .transact_async()
-            .await?;
+            .transact()
+            .await?
+            .into_result()?;
 
-        let f2 = new_account
+        new_account
             .call(contract.id(), "ft_transfer_from_account")
             .args_json((
                 alice.id(),
@@ -956,15 +955,9 @@ mod ws_tests {
                 approve_transfer_amount,
                 "test acc",
             ))
-            .transact_async()
-            .await?;
-
-        println!("pre join");
-        let (r1, r2) = tokio::join!(f1.into_future(), f2.into_future());
-        println!("post join");
-
-        r1?.into_result()?;
-        r2?.into_result()?;
+            .transact()
+            .await?
+            .into_result()?;
 
         let alice_balance = contract
             .call("ft_balance_of")
@@ -999,34 +992,54 @@ mod ws_tests {
         // defi contract must be registered as a FT account
         register_user(&contract, defi_contract.id()).await?;
 
-        // root invests in defi by calling `ft_transfer_call`
+        // TODO could use key in future, async calls are bugged in workspaces though
+        let spender = worker.dev_create_account().await?;
+
+        let approve_tx = contract
+            .call("ft_approve")
+            .args_json((
+                AccountIdOrKey::Account(spender.id().as_str().parse().unwrap()),
+                "0",
+                transfer_amount,
+            ))
+            .deposit(ONE_YOCTO)
+            .transact_async()
+            .await?;
+
+        assert!(approve_tx.status().await.is_ok());
+
+        let transfer_tx = spender
+            .call(contract.id(), "ft_transfer_call_from_account")
+            .args_json((
+                contract.id(),
+                defi_contract.id(),
+                transfer_amount,
+                Option::<String>::None,
+                "10",
+            ))
+            .max_gas()
+            // TODO do we need the deposit for transferring from another
+            // .deposit(ONE_YOCTO)
+            .transact_async()
+            .await?;
+
+        // Unregister storage before all transfer_call_from receipts finalize
+        // TODO this timeout is janky, but we don't have a way to listen to new block event.
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         let res = contract
-            .batch()
-            .call(
-                Function::new("ft_transfer_call")
-                    .args_json((
-                        defi_contract.id(),
-                        transfer_amount,
-                        Option::<String>::None,
-                        "10",
-                    ))
-                    .deposit(ONE_YOCTO)
-                    .gas(300_000_000_000_000 / 2),
-            )
-            .call(
-                Function::new("storage_unregister")
-                    .args_json((Some(true),))
-                    .deposit(ONE_YOCTO)
-                    .gas(300_000_000_000_000 / 2),
-            )
+            .call("storage_unregister")
+            .args_json((Some(true),))
+            .deposit(ONE_YOCTO)
+            .gas(300_000_000_000_000 / 2)
             .transact()
             .await?;
         assert!(res.is_success());
+        assert!(res.json::<bool>()?);
 
+        let res = transfer_tx.await?;
         let logs = res.logs();
+        assert!(&logs.contains(&"The account of the sender was deleted"));
         let expected = format!("Account @{} burned {}", contract.id(), 10);
-        assert!(logs.len() >= 2);
-        assert!(logs.contains(&"The account of the sender was deleted"));
         assert!(logs.contains(&(expected.as_str())));
 
         match res.receipt_outcomes()[5].clone().into_result()? {
@@ -1036,7 +1049,6 @@ mod ws_tests {
             }
             _ => panic!("Unexpected receipt id"),
         }
-        assert!(res.json::<bool>()?);
 
         let res = contract.call("ft_total_supply").view().await?;
         assert_eq!(res.json::<U128>()?.0, transfer_amount.0 - 10);

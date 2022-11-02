@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 // TODO
 #[derive(Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "value")]
 pub enum AccountIdOrKey {
     Account(AccountId),
     Key(PublicKey),
@@ -112,7 +112,7 @@ impl Contract {
                     k.clone(),
                     attached_deposit,
                     current_account,
-                    "ft_transfer_from,ft_transfer_call_from".to_string(),
+                    "ft_transfer_from_key,ft_transfer_call_from_key".to_string(),
                 );
             }
         }
@@ -126,6 +126,8 @@ impl Contract {
         // Update allowance to new value.
         self.approvals.insert(&lookup, &value.0);
 
+        // TODO remove temp log
+        log!("Approved {:?} for {}", lookup.1, lookup.0);
         // TODO emit approval event
     }
 
@@ -139,9 +141,43 @@ impl Contract {
     // ) {
     // }
 
-    pub fn ft_transfer_from(&mut self, from: AccountId, to: AccountId, amount: U128) {}
+    // TODO see if a way to avoid requiring multiple fns
+    // TODO docs
+    pub fn ft_transfer_from_account(
+        &mut self,
+        from: AccountId,
+        to: AccountId,
+        amount: U128,
+        memo: Option<String>,
+    ) {
+        self.ft_transfer_from(
+            AccountIdOrKey::Account(env::predecessor_account_id()),
+            from,
+            to,
+            amount,
+            memo,
+        )
+    }
 
-    pub fn ft_transfer_call_from(
+    // TODO docs
+    pub fn ft_transfer_from_key(
+        &mut self,
+        from: AccountId,
+        to: AccountId,
+        amount: U128,
+        memo: Option<String>,
+    ) {
+        self.ft_transfer_from(
+            AccountIdOrKey::Key(env::signer_account_pk()),
+            from,
+            to,
+            amount,
+            memo,
+        )
+    }
+
+    // TODO docs
+    pub fn ft_transfer_call_from_account(
         &mut self,
         from: AccountId,
         to: AccountId,
@@ -149,14 +185,82 @@ impl Contract {
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<U128> {
+        self.ft_transfer_call_from(
+            AccountIdOrKey::Account(env::predecessor_account_id()),
+            from,
+            to,
+            amount,
+            memo,
+            msg,
+        )
+    }
+
+    // TODO docs
+    pub fn ft_transfer_call_from_key(
+        &mut self,
+        from: AccountId,
+        to: AccountId,
+        amount: U128,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        self.ft_transfer_call_from(
+            AccountIdOrKey::Key(env::signer_account_pk()),
+            from,
+            to,
+            amount,
+            memo,
+            msg,
+        )
+    }
+
+    #[private]
+    // TODO docs
+    /// Callback function for `ft_transfer_call_from`.
+    pub fn ft_resolve_transfer_from(
+        &mut self,
+        spender: AccountIdOrKey,
+        sender_id: AccountId,
+        receiver_id: AccountId,
+        amount: U128,
+    ) -> U128 {
         todo!()
     }
 
-    pub fn ft_resolve_transfer_from(&mut self) -> U128 {
-        todo!()
-    }
-
+    // TODO docs
     pub fn ft_allowance(&self, owner: AccountId, spender: AccountIdOrKey) -> U128 {
+        U128(self.approvals.get(&(owner, spender)).unwrap_or_default())
+    }
+
+    fn ft_transfer_from(
+        &mut self,
+        spender: AccountIdOrKey,
+        from: AccountId,
+        to: AccountId,
+        amount: U128,
+        memo: Option<String>,
+    ) {
+        // Check to ensure sufficient allowance and update with subtracted value.
+        let lookup = (from.clone(), spender);
+        let allowed = self.approvals.get(&lookup).unwrap();
+        let new_allowance = allowed
+            .checked_sub(amount.0)
+            .unwrap_or_else(|| env::panic_str("insufficient allownance for transfer"));
+        self.approvals.insert(&lookup, &new_allowance);
+
+        // Perform token transfer.
+        self.token.internal_transfer(&from, &to, amount.0, memo);
+    }
+
+    fn ft_transfer_call_from(
+        &mut self,
+        spender: AccountIdOrKey,
+        from: AccountId,
+        to: AccountId,
+        amount: U128,
+        memo: Option<String>,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
         todo!()
     }
 }
@@ -243,11 +347,13 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod ws_tests {
+    use super::AccountIdOrKey;
     use near_sdk::json_types::U128;
     use near_sdk::ONE_YOCTO;
     use near_units::parse_near;
     use workspaces::operations::Function;
     use workspaces::result::ValueOrReceiptId;
+    use workspaces::types::{KeyType, SecretKey};
     use workspaces::{Account, AccountId, Contract, DevNetwork, Worker};
 
     async fn register_user(contract: &Contract, account_id: &AccountId) -> anyhow::Result<()> {
@@ -675,4 +781,140 @@ mod ws_tests {
     }
 
     // ----- END ported tests ----
+
+    #[tokio::test]
+    async fn test_approve() -> anyhow::Result<()> {
+        let initial_balance = U128::from(parse_near!("10000 N"));
+        let alice_amount = U128::from(parse_near!("100 N"));
+        let approve_amount = U128::from(parse_near!("50 N"));
+        let approve_transfer_amount = U128::from(parse_near!("20 N"));
+        let worker = workspaces::sandbox().await?;
+        let (contract, alice, _) = init(&worker, initial_balance).await?;
+
+        let res = contract
+            .call("ft_transfer")
+            .args_json((alice.id(), alice_amount, Option::<bool>::None))
+            .max_gas()
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        let new_account = worker.dev_create_account().await?;
+
+        let res = alice
+            .call(contract.id(), "ft_approve")
+            .args_json((
+                AccountIdOrKey::Account(new_account.id().as_str().parse().unwrap()),
+                "0",
+                approve_amount,
+            ))
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        let access_pk = SecretKey::from_random(KeyType::ED25519);
+
+        let res = alice
+            .call(contract.id(), "ft_approve")
+            .args_json((
+                serde_json::json!({"type": "Key", "value": access_pk.public_key()}),
+                "0",
+                approve_amount,
+            ))
+            // TODO play with deposit
+            .deposit(parse_near!("1 N"))
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        // Ensure balances have not changed from approvals
+        let root_balance = contract
+            .call("ft_balance_of")
+            .args_json((contract.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        let alice_balance = contract
+            .call("ft_balance_of")
+            .args_json((alice.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(initial_balance.0 - alice_amount.0, root_balance.0);
+        assert_eq!(alice_amount.0, alice_balance.0);
+
+        // Check allowance amounts
+        let key_allowance = contract
+            .call("ft_allowance")
+            .args_json((
+                alice.id(),
+                serde_json::json!({"type": "Key", "value": access_pk.public_key()}),
+            ))
+            .view()
+            .await?
+            .json::<U128>()?;
+        let account_allowance = contract
+            .call("ft_allowance")
+            .args_json((
+                alice.id(),
+                AccountIdOrKey::Account(new_account.id().as_str().parse().unwrap()),
+            ))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(account_allowance.0, approve_amount.0);
+        assert_eq!(key_allowance.0, approve_amount.0);
+
+        let access_signer = Account::from_secret_key(contract.id().clone(), access_pk, &worker);
+
+        let receiver_account = worker.dev_create_account().await?;
+
+        register_user(&contract, receiver_account.id()).await?;
+
+        let res = access_signer
+            .call(contract.id(), "ft_transfer_from_key")
+            .args_json((
+                alice.id(),
+                receiver_account.id(),
+                approve_transfer_amount,
+                "test memo",
+            ))
+            .transact()
+            .await?;
+        res.into_result()?;
+
+        new_account
+            .call(contract.id(), "ft_transfer_from_account")
+            .args_json((
+                alice.id(),
+                receiver_account.id(),
+                approve_transfer_amount,
+                "test acc",
+            ))
+            .transact()
+            .await?
+            .into_result()?;
+
+        let alice_balance = contract
+            .call("ft_balance_of")
+            .args_json((alice.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        let receiver_balance = contract
+            .call("ft_balance_of")
+            .args_json((receiver_account.id(),))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(
+            alice_amount.0 - (approve_transfer_amount.0 * 2),
+            alice_balance.0
+        );
+        assert_eq!(approve_transfer_amount.0 * 2, receiver_balance.0);
+
+        Ok(())
+    }
 }

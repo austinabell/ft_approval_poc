@@ -5,13 +5,8 @@ use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::U128;
 use near_sdk::{
-    env, log, near_bindgen, require, AccountId, Balance, Gas, PanicOnDefault,
-    PromiseOrValue,
+    env, log, near_bindgen, require, AccountId, Balance, PanicOnDefault, PromiseOrValue,
 };
-
-const BASE_GAS: u64 = 5_000_000_000_000;
-const PROMISE_CALL: u64 = 5_000_000_000_000;
-const GAS_FOR_FT_ON_TRANSFER: Gas = Gas(BASE_GAS + PROMISE_CALL);
 
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
@@ -24,7 +19,9 @@ impl DeFi {
     #[init]
     pub fn new(fungible_token_account_id: AccountId) -> Self {
         require!(!env::state_exists(), "Already initialized");
-        Self { fungible_token_account_id: fungible_token_account_id.into() }
+        Self {
+            fungible_token_account_id: fungible_token_account_id.into(),
+        }
     }
 
     pub fn value_please(&self, amount_to_return: String) -> PromiseOrValue<U128> {
@@ -50,17 +47,17 @@ impl FungibleTokenReceiver for DeFi {
             env::predecessor_account_id() == self.fungible_token_account_id,
             "Only supports the one fungible token contract"
         );
-        log!("in {} tokens from @{} ft_on_transfer, msg = {}", amount.0, sender_id.as_ref(), msg);
+        log!(
+            "in {} tokens from @{} ft_on_transfer, msg = {}",
+            amount.0,
+            sender_id.as_ref(),
+            msg
+        );
         match msg.as_str() {
-            "take-my-money" => PromiseOrValue::Value(U128::from(0)),
-            _ => {
-                let prepaid_gas = env::prepaid_gas();
-                let account_id = env::current_account_id();
-                Self::ext(account_id)
-                    .with_static_gas(prepaid_gas - GAS_FOR_FT_ON_TRANSFER)
-                    .value_please(msg)
-                    .into()
-            }
+            "take-my-money" => PromiseOrValue::Value(U128(0)),
+            _ => Self::ext(env::current_account_id())
+                .value_please(msg)
+                .into(),
         }
     }
 }

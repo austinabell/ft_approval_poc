@@ -1,13 +1,14 @@
 use near_contract_standards::fungible_token::metadata::{
     FungibleTokenMetadata, FungibleTokenMetadataProvider, FT_METADATA_SPEC,
 };
+use near_contract_standards::fungible_token::receiver::ext_ft_receiver;
 use near_contract_standards::fungible_token::FungibleToken;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::collections::{LazyOption, LookupMap};
 use near_sdk::json_types::U128;
 use near_sdk::{
-    env, log, near_bindgen, require, AccountId, Balance, BorshStorageKey, PanicOnDefault, Promise,
-    PromiseOrValue, PublicKey,
+    env, log, near_bindgen, require, AccountId, Balance, BorshStorageKey, Gas, PanicOnDefault,
+    Promise, PromiseOrValue, PublicKey,
 };
 use serde::{Deserialize, Serialize};
 
@@ -224,7 +225,33 @@ impl Contract {
         receiver_id: AccountId,
         amount: U128,
     ) -> U128 {
-        todo!()
+        let (used_amount, burned_amount) =
+            self.token
+                .internal_ft_resolve_transfer(&sender_id, receiver_id, amount);
+
+        let lookup = (sender_id, spender);
+        let approval_amount = self.approvals.get(&lookup).unwrap_or_default();
+        // This recalculation is redundant, since we have it in internal_ft_resolve_transfer.
+        let unused_amount = amount
+            .0
+            .checked_sub(used_amount)
+            .expect("used gas amount more than total");
+
+        // Doing saturating add to avoid being able to manually trigger overflow on resolve
+        // by increasing allowance and having a refund which sum to > u128::MAX.
+        let approval_amount = approval_amount.saturating_add(unused_amount);
+
+        // TODO actually, do we want this at all? What about the case where the approval amount
+        // TODO is updated before the resolve transfer finalizes?
+        // Increase approval amount by the unused amount.
+        self.approvals.insert(&lookup, &approval_amount);
+
+        if burned_amount > 0 {
+            self.on_tokens_burned(lookup.0, burned_amount);
+            // TODO do we want to remove the access key if we notice the account has been deleted?
+        }
+
+        U128(used_amount)
     }
 
     // TODO docs
@@ -235,33 +262,60 @@ impl Contract {
     fn ft_transfer_from(
         &mut self,
         spender: AccountIdOrKey,
-        from: AccountId,
-        to: AccountId,
+        sender_id: AccountId,
+        receiver_id: AccountId,
         amount: U128,
         memo: Option<String>,
     ) {
         // Check to ensure sufficient allowance and update with subtracted value.
-        let lookup = (from.clone(), spender);
-        let allowed = self.approvals.get(&lookup).unwrap();
-        let new_allowance = allowed
+        let lookup = (sender_id.clone(), spender);
+        let allowed_amount = self.approvals.get(&lookup).unwrap();
+        let new_allowance = allowed_amount
             .checked_sub(amount.0)
             .unwrap_or_else(|| env::panic_str("insufficient allownance for transfer"));
         self.approvals.insert(&lookup, &new_allowance);
 
         // Perform token transfer.
-        self.token.internal_transfer(&from, &to, amount.0, memo);
+        self.token
+            .internal_transfer(&sender_id, &receiver_id, amount.0, memo);
     }
 
     fn ft_transfer_call_from(
         &mut self,
         spender: AccountIdOrKey,
-        from: AccountId,
-        to: AccountId,
+        sender_id: AccountId,
+        receiver_id: AccountId,
         amount: U128,
         memo: Option<String>,
         msg: String,
     ) -> PromiseOrValue<U128> {
-        todo!()
+        // TODO decide if ==1 or >=1
+        require!(env::attached_deposit() == 1);
+
+        let lookup = (sender_id, spender);
+        let allowed_amount = self.approvals.get(&lookup).unwrap();
+        let new_allowance = allowed_amount
+            .checked_sub(amount.0)
+            .unwrap_or_else(|| env::panic_str("insufficient allownance for transfer"));
+        self.approvals.insert(&lookup, &new_allowance);
+        let (sender_id, spender) = lookup;
+
+        let amount: Balance = amount.0;
+        self.token
+            .internal_transfer(&sender_id, &receiver_id, amount, memo);
+
+        // Initiating receiver's call and the callback
+        ext_ft_receiver::ext(receiver_id.clone())
+            // TODO decide what weight of gas makes sense
+            .with_unused_gas_weight(2)
+            .ft_on_transfer(sender_id.clone(), amount.into(), msg)
+            .then(
+                Self::ext(env::current_account_id())
+                    // TODO figure out reasonable static gas to ensure callback succeeds
+                    .with_static_gas(Gas(5_000_000_000_000))
+                    .ft_resolve_transfer_from(spender, sender_id, receiver_id, amount.into()),
+            )
+            .into()
     }
 }
 
@@ -369,10 +423,19 @@ mod ws_tests {
         Ok(())
     }
 
+    async fn create_and_register_user(
+        contract: &Contract,
+        worker: &Worker<impl DevNetwork>,
+    ) -> anyhow::Result<Account> {
+        let account = worker.dev_create_account().await?;
+        register_user(contract, account.id()).await?;
+        Ok(account)
+    }
+
     async fn init(
         worker: &Worker<impl DevNetwork>,
         initial_balance: U128,
-    ) -> anyhow::Result<(Contract, Account, Contract)> {
+    ) -> anyhow::Result<Contract> {
         let ft_contract = worker
             .dev_deploy(&workspaces::compile_project("./").await?)
             .await?;
@@ -385,44 +448,32 @@ mod ws_tests {
             .await?;
         assert!(res.is_success());
 
-        let defi_contract = worker
+        return Ok(ft_contract);
+    }
+
+    async fn init_defi_contract(
+        worker: &Worker<impl DevNetwork>,
+        ft_id: &AccountId,
+    ) -> anyhow::Result<Contract> {
+        let contract = worker
             .dev_deploy(&workspaces::compile_project("./test-contract-defi").await?)
             .await?;
 
-        let res = defi_contract
+        let res = contract
             .call("new")
-            .args_json((ft_contract.id(),))
+            .args_json((ft_id,))
             .max_gas()
             .transact()
             .await?;
         assert!(res.is_success());
-
-        let alice = ft_contract
-            .as_account()
-            .create_subaccount("alice")
-            .initial_balance(parse_near!("10 N"))
-            .transact()
-            .await?
-            .into_result()?;
-        register_user(&ft_contract, alice.id()).await?;
-
-        let res = ft_contract
-            .call("storage_deposit")
-            .args_json((alice.id(), Option::<bool>::None))
-            .deposit(near_sdk::env::storage_byte_cost() * 125)
-            .max_gas()
-            .transact()
-            .await?;
-        assert!(res.is_success());
-
-        return Ok((ft_contract, alice, defi_contract));
+        Ok(contract)
     }
 
     #[tokio::test]
     async fn test_total_supply() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
+        let initial_balance = U128(10000);
         let worker = workspaces::sandbox().await?;
-        let (contract, _, _) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
 
         let res = contract.call("ft_total_supply").view().await?;
         assert_eq!(res.json::<U128>()?, initial_balance);
@@ -432,10 +483,11 @@ mod ws_tests {
 
     #[tokio::test]
     async fn test_simple_transfer() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
-        let transfer_amount = U128::from(parse_near!("100 N"));
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
-        let (contract, alice, _) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
+        let alice = create_and_register_user(&contract, &worker).await?;
 
         let res = contract
             .call("ft_transfer")
@@ -466,9 +518,10 @@ mod ws_tests {
 
     #[tokio::test]
     async fn test_close_account_empty_balance() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
+        let initial_balance = U128(10000);
         let worker = workspaces::sandbox().await?;
-        let (contract, alice, _) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
+        let alice = create_and_register_user(&contract, &worker).await?;
 
         let res = alice
             .call(contract.id(), "storage_unregister")
@@ -484,9 +537,9 @@ mod ws_tests {
 
     #[tokio::test]
     async fn test_close_account_non_empty_balance() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
+        let initial_balance = U128(10000);
         let worker = workspaces::sandbox().await?;
-        let (contract, _, _) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
 
         let res = contract
             .call("storage_unregister")
@@ -513,9 +566,9 @@ mod ws_tests {
 
     #[tokio::test]
     async fn simulate_close_account_force_non_empty_balance() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
+        let initial_balance = U128(10000);
         let worker = workspaces::sandbox().await?;
-        let (contract, _, _) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
 
         let res = contract
             .call("storage_unregister")
@@ -534,10 +587,11 @@ mod ws_tests {
 
     #[tokio::test]
     async fn simulate_transfer_call_with_burned_amount() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
-        let transfer_amount = U128::from(parse_near!("100 N"));
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
-        let (contract, _, defi_contract) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
 
         // defi contract must be registered as a FT account
         register_user(&contract, defi_contract.id()).await?;
@@ -598,10 +652,11 @@ mod ws_tests {
 
     #[tokio::test]
     async fn simulate_transfer_call_with_immediate_return_and_no_refund() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
-        let transfer_amount = U128::from(parse_near!("100 N"));
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
-        let (contract, _, defi_contract) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
 
         // defi contract must be registered as a FT account
         register_user(&contract, defi_contract.id()).await?;
@@ -642,10 +697,11 @@ mod ws_tests {
     #[tokio::test]
     async fn simulate_transfer_call_when_called_contract_not_registered_with_ft(
     ) -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
-        let transfer_amount = U128::from(parse_near!("100 N"));
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
-        let (contract, _, defi_contract) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
 
         // call fails because DEFI contract is not registered as FT user
         let res = contract
@@ -683,11 +739,12 @@ mod ws_tests {
 
     #[tokio::test]
     async fn simulate_transfer_call_with_promise_and_refund() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
-        let refund_amount = U128::from(parse_near!("50 N"));
-        let transfer_amount = U128::from(parse_near!("100 N"));
+        let initial_balance = U128(10000);
+        let refund_amount = U128(50);
+        let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
-        let (contract, _, defi_contract) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
 
         // defi contract must be registered as a FT account
         register_user(&contract, defi_contract.id()).await?;
@@ -729,10 +786,11 @@ mod ws_tests {
 
     #[tokio::test]
     async fn simulate_transfer_call_promise_panics_for_a_full_refund() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
-        let transfer_amount = U128::from(parse_near!("100 N"));
+        let initial_balance = U128(10000);
+        let transfer_amount = U128(100);
         let worker = workspaces::sandbox().await?;
-        let (contract, _, defi_contract) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
+        let defi_contract = init_defi_contract(&worker, contract.id()).await?;
 
         // defi contract must be registered as a FT account
         register_user(&contract, defi_contract.id()).await?;
@@ -784,12 +842,13 @@ mod ws_tests {
 
     #[tokio::test]
     async fn test_approve() -> anyhow::Result<()> {
-        let initial_balance = U128::from(parse_near!("10000 N"));
-        let alice_amount = U128::from(parse_near!("100 N"));
-        let approve_amount = U128::from(parse_near!("50 N"));
-        let approve_transfer_amount = U128::from(parse_near!("20 N"));
+        let initial_balance = U128(10000);
+        let alice_amount = U128(100);
+        let approve_amount = U128(50);
+        let approve_transfer_amount = U128(20);
         let worker = workspaces::sandbox().await?;
-        let (contract, alice, _) = init(&worker, initial_balance).await?;
+        let contract = init(&worker, initial_balance).await?;
+        let alice = create_and_register_user(&contract, &worker).await?;
 
         let res = contract
             .call("ft_transfer")
@@ -869,9 +928,7 @@ mod ws_tests {
 
         let access_signer = Account::from_secret_key(contract.id().clone(), access_pk, &worker);
 
-        let receiver_account = worker.dev_create_account().await?;
-
-        register_user(&contract, receiver_account.id()).await?;
+        let receiver_account = create_and_register_user(&contract, &worker).await?;
 
         let res = access_signer
             .call(contract.id(), "ft_transfer_from_key")

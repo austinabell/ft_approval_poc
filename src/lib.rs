@@ -14,10 +14,11 @@ use serde::{Deserialize, Serialize};
 
 const ERR_ATOMIC_UPDATE: &str = "Invalid current approval value. Failed to do atomic update";
 
-// TODO
+/// Type that can represent an [`Account`](AccountOrKey::Account) with an [`AccountId`] or
+/// a [`Key`](AccountOrKey::Key) with a [`PublicKey`].
 #[derive(Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
-#[serde(tag = "type", content = "value")]
-pub enum AccountIdOrKey {
+#[serde(rename_all = "snake_case")]
+pub enum AccountOrKey {
     Account(AccountId),
     Key(PublicKey),
 }
@@ -29,7 +30,7 @@ pub struct Contract {
     metadata: LazyOption<FungibleTokenMetadata>,
 
     /// Approval standard state
-    approvals: LookupMap<(AccountId, AccountIdOrKey), Balance>,
+    approvals: LookupMap<(AccountId, AccountOrKey), Balance>,
 }
 
 const DATA_IMAGE_SVG_NEAR_ICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 288 288'%3E%3Cg id='l' data-name='l'%3E%3Cpath d='M187.58,79.81l-30.1,44.69a3.2,3.2,0,0,0,4.75,4.2L191.86,103a1.2,1.2,0,0,1,2,.91v80.46a1.2,1.2,0,0,1-2.12.77L102.18,77.93A15.35,15.35,0,0,0,90.47,72.5H87.34A15.34,15.34,0,0,0,72,87.84V201.16A15.34,15.34,0,0,0,87.34,216.5h0a15.35,15.35,0,0,0,13.08-7.31l30.1-44.69a3.2,3.2,0,0,0-4.75-4.2L96.14,186a1.2,1.2,0,0,1-2-.91V104.61a1.2,1.2,0,0,1,2.12-.77l89.55,107.23a15.35,15.35,0,0,0,11.71,5.43h3.13A15.34,15.34,0,0,0,216,201.16V87.84A15.34,15.34,0,0,0,200.66,72.5h0A15.35,15.35,0,0,0,187.58,79.81Z'/%3E%3C/g%3E%3C/svg%3E";
@@ -96,7 +97,7 @@ impl Contract {
     /// * `current_value` The amount of tokens currently allowed. This is used to ensure atomicity.
     /// * `value` The amount of tokens to be spent.
     #[payable]
-    pub fn ft_approve(&mut self, spender: AccountIdOrKey, current_value: U128, value: U128) {
+    pub fn ft_approve(&mut self, spender: AccountOrKey, current_value: U128, value: U128) {
         let attached_deposit = env::attached_deposit();
         // Assert that there is a deposit for the transaction for security.
         // This deposit is used for access key allowance if approving using a key.
@@ -104,11 +105,11 @@ impl Contract {
 
         let predecessor = env::predecessor_account_id();
         match &spender {
-            AccountIdOrKey::Account(a) => {
+            AccountOrKey::Account(a) => {
                 // Ensure that the approval is not given to the same account as the owner.
                 require!(a != &predecessor);
             }
-            AccountIdOrKey::Key(k) => {
+            AccountOrKey::Key(k) => {
                 let current_account = env::current_account_id();
                 // TODO this can be optimized by avoiding Promise API.
                 Promise::new(current_account.clone()).add_access_key(
@@ -157,7 +158,7 @@ impl Contract {
         memo: Option<String>,
     ) {
         self.ft_transfer_from(
-            AccountIdOrKey::Account(env::predecessor_account_id()),
+            AccountOrKey::Account(env::predecessor_account_id()),
             from,
             to,
             amount,
@@ -174,7 +175,7 @@ impl Contract {
         memo: Option<String>,
     ) {
         self.ft_transfer_from(
-            AccountIdOrKey::Key(env::signer_account_pk()),
+            AccountOrKey::Key(env::signer_account_pk()),
             from,
             to,
             amount,
@@ -192,7 +193,7 @@ impl Contract {
         msg: String,
     ) -> PromiseOrValue<U128> {
         self.ft_transfer_call_from(
-            AccountIdOrKey::Account(env::predecessor_account_id()),
+            AccountOrKey::Account(env::predecessor_account_id()),
             from,
             to,
             amount,
@@ -211,7 +212,7 @@ impl Contract {
         msg: String,
     ) -> PromiseOrValue<U128> {
         self.ft_transfer_call_from(
-            AccountIdOrKey::Key(env::signer_account_pk()),
+            AccountOrKey::Key(env::signer_account_pk()),
             from,
             to,
             amount,
@@ -225,7 +226,7 @@ impl Contract {
     /// Callback function for `ft_transfer_call_from`.
     pub fn ft_resolve_transfer_from(
         &mut self,
-        spender: AccountIdOrKey,
+        spender: AccountOrKey,
         sender_id: AccountId,
         receiver_id: AccountId,
         amount: U128,
@@ -264,13 +265,13 @@ impl Contract {
     }
 
     // TODO docs
-    pub fn ft_allowance(&self, owner: AccountId, spender: AccountIdOrKey) -> U128 {
+    pub fn ft_allowance(&self, owner: AccountId, spender: AccountOrKey) -> U128 {
         U128(self.approvals.get(&(owner, spender)).unwrap_or_default())
     }
 
     fn ft_transfer_from(
         &mut self,
-        spender: AccountIdOrKey,
+        spender: AccountOrKey,
         sender_id: AccountId,
         receiver_id: AccountId,
         amount: U128,
@@ -291,7 +292,7 @@ impl Contract {
 
     fn ft_transfer_call_from(
         &mut self,
-        spender: AccountIdOrKey,
+        spender: AccountOrKey,
         sender_id: AccountId,
         receiver_id: AccountId,
         amount: U128,
@@ -410,13 +411,28 @@ mod tests {
         );
         assert_eq!(contract.ft_balance_of(accounts(1)).0, transfer_amount);
     }
+
+    #[test]
+    fn account_or_key_serialization() {
+        let acc = AccountOrKey::Account("test.near".parse().unwrap());
+        let serialized_acc = serde_json::to_string(&acc).unwrap();
+        assert_eq!(serialized_acc, r#"{"account":"test.near"}"#);
+
+        let key_str = "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp";
+        let key = AccountOrKey::Key(key_str.parse().unwrap());
+        let serialized_key = serde_json::to_string(&key).unwrap();
+        assert_eq!(
+            serialized_key,
+            r#"{"key":"ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp"}"#
+        );
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod ws_tests {
     use std::future::IntoFuture;
 
-    use super::AccountIdOrKey;
+    use super::AccountOrKey;
     use near_sdk::json_types::U128;
     use near_sdk::ONE_YOCTO;
     use near_units::parse_near;
@@ -859,7 +875,7 @@ mod ws_tests {
         let contract = init(&worker, U128(1000)).await?;
 
         let spender_account: AccountId = "test.near".parse().unwrap();
-        let account_json = AccountIdOrKey::Account(spender_account.as_str().parse().unwrap());
+        let account_json = AccountOrKey::Account(spender_account.as_str().parse().unwrap());
 
         let res = contract
             .call("ft_approve")
@@ -893,7 +909,7 @@ mod ws_tests {
         let res = contract
             .call("ft_approve")
             .args_json((
-                AccountIdOrKey::Account(spender_account.as_str().parse().unwrap()),
+                AccountOrKey::Account(spender_account.as_str().parse().unwrap()),
                 "100",
                 "80",
             ))
@@ -933,7 +949,7 @@ mod ws_tests {
         assert!(res.status().await.is_ok());
 
         let new_account = worker.dev_create_account().await?;
-        let new_account_json = AccountIdOrKey::Account(new_account.id().as_str().parse().unwrap());
+        let new_account_json = AccountOrKey::Account(new_account.id().as_str().parse().unwrap());
 
         let f1 = alice
             .call(contract.id(), "ft_approve")
@@ -1059,7 +1075,7 @@ mod ws_tests {
 
         // TODO could use key in future, async calls are bugged in workspaces though
         let spender = worker.dev_create_account().await?;
-        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
+        let spender_json = AccountOrKey::Account(spender.id().as_str().parse().unwrap());
 
         let approve_tx = contract
             .call("ft_approve")
@@ -1146,7 +1162,7 @@ mod ws_tests {
 
         // TODO could use key in future, async calls are bugged in workspaces though
         let spender = worker.dev_create_account().await?;
-        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
+        let spender_json = AccountOrKey::Account(spender.id().as_str().parse().unwrap());
 
         let approve_tx = contract
             .call("ft_approve")
@@ -1209,7 +1225,7 @@ mod ws_tests {
 
         // TODO could use key in future, async calls are bugged in workspaces though
         let spender = worker.dev_create_account().await?;
-        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
+        let spender_json = AccountOrKey::Account(spender.id().as_str().parse().unwrap());
 
         let approve_tx = contract
             .call("ft_approve")
@@ -1280,7 +1296,7 @@ mod ws_tests {
         register_user(&contract, defi_contract.id()).await?;
 
         let spender = worker.dev_create_account().await?;
-        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
+        let spender_json = AccountOrKey::Account(spender.id().as_str().parse().unwrap());
 
         let approve_tx = contract
             .call("ft_approve")
@@ -1346,7 +1362,7 @@ mod ws_tests {
         register_user(&contract, defi_contract.id()).await?;
 
         let spender = worker.dev_create_account().await?;
-        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
+        let spender_json = AccountOrKey::Account(spender.id().as_str().parse().unwrap());
 
         let approve_tx = contract
             .call("ft_approve")

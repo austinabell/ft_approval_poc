@@ -1247,10 +1247,17 @@ mod ws_tests {
         assert_eq!(initial_balance.0, root_balance.0);
         assert_eq!(0, defi_balance.0);
 
+        let allowance = contract
+            .call("ft_allowance")
+            .args_json((contract.id(), &spender_json))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(allowance.0, transfer_amount.0);
+
         Ok(())
     }
 
-    // TODO
     #[tokio::test]
     async fn test_transfer_call_from_with_promise_and_refund() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
@@ -1263,19 +1270,30 @@ mod ws_tests {
         // defi contract must be registered as a FT account
         register_user(&contract, defi_contract.id()).await?;
 
-        let res = contract
-            .call("ft_transfer_call")
+        let spender = worker.dev_create_account().await?;
+        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
+
+        let approve_tx = contract
+            .call("ft_approve")
+            .args_json((&spender_json, "0", transfer_amount))
+            .deposit(ONE_YOCTO)
+            .transact_async()
+            .await?;
+        assert!(approve_tx.status().await.is_ok());
+
+        let res = spender
+            .call(contract.id(), "ft_transfer_call_from_account")
             .args_json((
+                contract.id(),
                 defi_contract.id(),
                 transfer_amount,
                 Option::<String>::None,
-                refund_amount.0.to_string(),
+                refund_amount,
             ))
             .max_gas()
-            .deposit(ONE_YOCTO)
             .transact()
             .await?;
-        assert!(res.is_success());
+        res.into_result()?;
 
         let root_balance = contract
             .call("ft_balance_of")
@@ -1294,6 +1312,15 @@ mod ws_tests {
             root_balance.0
         );
         assert_eq!(transfer_amount.0 - refund_amount.0, defi_balance.0);
+
+        // Allowance should be increased to the refund amount.
+        let allowance = contract
+            .call("ft_allowance")
+            .args_json((contract.id(), &spender_json))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(allowance.0, refund_amount.0);
 
         Ok(())
     }

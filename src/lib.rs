@@ -1325,7 +1325,6 @@ mod ws_tests {
         Ok(())
     }
 
-    // TODO
     #[tokio::test]
     async fn test_transfer_call_from_promise_panics_for_a_full_refund() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
@@ -1337,26 +1336,35 @@ mod ws_tests {
         // defi contract must be registered as a FT account
         register_user(&contract, defi_contract.id()).await?;
 
-        // root invests in defi by calling `ft_transfer_call`
-        let res = contract
-            .call("ft_transfer_call")
+        let spender = worker.dev_create_account().await?;
+        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
+
+        let approve_tx = contract
+            .call("ft_approve")
+            .args_json((&spender_json, "0", transfer_amount))
+            .deposit(ONE_YOCTO)
+            .transact_async()
+            .await?;
+        assert!(approve_tx.status().await.is_ok());
+
+        let res = spender
+            .call(contract.id(), "ft_transfer_call_from_account")
             .args_json((
+                contract.id(),
                 defi_contract.id(),
                 transfer_amount,
                 Option::<String>::None,
-                "no parsey as integer big panic oh no".to_string(),
+                "no parsey as integer big panic oh no",
             ))
             .max_gas()
-            .deposit(ONE_YOCTO)
             .transact()
             .await?;
         assert!(res.is_success());
 
         let promise_failures = res.receipt_failures();
         assert_eq!(promise_failures.len(), 1);
-        let failure = promise_failures[0].clone().into_result();
-        let err = failure.unwrap_err();
-        assert!(err.to_string().contains("ParseIntError"));
+        let err = promise_failures[0].clone().into_result();
+        assert!(err.unwrap_err().to_string().contains("ParseIntError"));
 
         // balances remain unchanged
         let root_balance = contract
@@ -1373,6 +1381,15 @@ mod ws_tests {
             .json::<U128>()?;
         assert_eq!(initial_balance, root_balance);
         assert_eq!(0, defi_balance.0);
+
+        // Allowance should be increased to the refund amount.
+        let allowance = contract
+            .call("ft_allowance")
+            .args_json((contract.id(), &spender_json))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(allowance.0, transfer_amount.0);
 
         Ok(())
     }

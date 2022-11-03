@@ -1189,7 +1189,6 @@ mod ws_tests {
         Ok(())
     }
 
-    // TODO
     #[tokio::test]
     async fn test_transfer_call_from_when_called_contract_not_registered_with_ft(
     ) -> anyhow::Result<()> {
@@ -1199,20 +1198,38 @@ mod ws_tests {
         let contract = init(&worker, initial_balance).await?;
         let defi_contract = init_defi_contract(&worker, contract.id()).await?;
 
+        // TODO could use key in future, async calls are bugged in workspaces though
+        let spender = worker.dev_create_account().await?;
+        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
+
+        let approve_tx = contract
+            .call("ft_approve")
+            .args_json((&spender_json, "0", transfer_amount))
+            .deposit(ONE_YOCTO)
+            .transact_async()
+            .await?;
+        assert!(approve_tx.status().await.is_ok());
+
         // call fails because DEFI contract is not registered as FT user
-        let res = contract
-            .call("ft_transfer_call")
+        let res = spender
+            .call(contract.id(), "ft_transfer_call_from_account")
             .args_json((
+                contract.id(),
                 defi_contract.id(),
                 transfer_amount,
                 Option::<String>::None,
                 "take-my-money",
             ))
             .max_gas()
-            .deposit(ONE_YOCTO)
+            // TODO do we need the deposit for transferring from another
+            // .deposit(ONE_YOCTO)
             .transact()
             .await?;
-        assert!(res.is_failure());
+        assert!(res
+            .into_result()
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("{} is not registered", defi_contract.id())));
 
         // balances remain unchanged
         let root_balance = contract

@@ -990,13 +990,16 @@ mod ws_tests {
 
         let access_signer = Account::from_secret_key(contract.id().clone(), access_pk, &worker);
 
-        let receiver_account = create_and_register_user(&contract, &worker).await?;
+        let key_receiver = "keyreceiver.testnet".parse().unwrap();
+        register_user(&contract, &key_receiver).await?;
+        let account_receiver: AccountId = "accountreceiver.testnet".parse().unwrap();
+        register_user(&contract, &account_receiver).await?;
 
         access_signer
             .call(contract.id(), "ft_transfer_from_key")
             .args_json((
                 alice.id(),
-                receiver_account.id(),
+                &key_receiver,
                 approve_transfer_amount,
                 "test memo",
             ))
@@ -1008,7 +1011,7 @@ mod ws_tests {
             .call(contract.id(), "ft_transfer_from_account")
             .args_json((
                 alice.id(),
-                receiver_account.id(),
+                &account_receiver,
                 approve_transfer_amount,
                 "test acc",
             ))
@@ -1022,18 +1025,24 @@ mod ws_tests {
             .view()
             .await?
             .json::<U128>()?;
-        let receiver_balance = contract
-            .call("ft_balance_of")
-            .args_json((receiver_account.id(),))
-            .view()
-            .await?
-            .json::<U128>()?;
         assert_eq!(
             alice_amount.0 - (approve_transfer_amount.0 * 2),
             alice_balance.0
         );
-        assert_eq!(approve_transfer_amount.0 * 2, receiver_balance.0);
-
+        let key_balance = contract
+            .call("ft_balance_of")
+            .args_json((key_receiver,))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(approve_transfer_amount.0, key_balance.0);
+        let account_balance = contract
+            .call("ft_balance_of")
+            .args_json((account_receiver,))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(approve_transfer_amount.0, account_balance.0);
         Ok(())
     }
 

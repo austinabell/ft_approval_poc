@@ -134,7 +134,7 @@ impl Contract {
 
         // TODO remove temp log
         log!("Approved {:?} for {}", lookup.1, lookup.0);
-        // TODO emit approval event
+        // TODO(spec) emit approval event. Do we want to match Eth's owner, spender, value pattern?
     }
 
     // // TODO docs
@@ -246,7 +246,7 @@ impl Contract {
         // by increasing allowance and having a refund which sum to > u128::MAX.
         let approval_amount = approval_amount.saturating_add(unused_amount);
 
-        // TODO actually, do we want this at all? What about the case where the approval amount
+        // TODO(spec) actually, do we want this at all? What about the case where the approval amount
         // TODO is updated before the resolve transfer finalizes?
         // Increase approval amount by the unused amount.
         // TODO we probably want to remove if 0 rather than updating to 0
@@ -254,7 +254,7 @@ impl Contract {
 
         if burned_amount > 0 {
             self.on_tokens_burned(lookup.0, burned_amount);
-            // TODO do we actually want to keep the allowance when we notice a deleted account/burn?
+            // TODO(spec) do we actually want to keep the allowance when we notice a deleted account/burn?
             // Option 1: we keep the allowance
             // Option 2: We remove only the allowance from the key/account we are resolving
             // Option 3: Use nested maps to clear all allowances when a delete is noticed (seems like this is bad incentives)
@@ -1079,7 +1079,7 @@ mod ws_tests {
                 "10",
             ))
             .max_gas()
-            // TODO do we need the deposit for transferring from another
+            // TODO(spec) do we need the deposit for transferring from another account?
             // .deposit(ONE_YOCTO)
             .transact_async()
             .await?;

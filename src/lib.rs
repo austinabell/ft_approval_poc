@@ -12,6 +12,8 @@ use near_sdk::{
 };
 use serde::{Deserialize, Serialize};
 
+const ERR_ATOMIC_UPDATE: &str = "Invalid current approval value. Failed to do atomic update";
+
 // TODO
 #[derive(Debug, Serialize, Deserialize, BorshDeserialize, BorshSerialize)]
 #[serde(tag = "type", content = "value")]
@@ -122,7 +124,10 @@ impl Contract {
         let prev = self.approvals.get(&lookup);
 
         // Compare previous value before updating.
-        require!(prev.unwrap_or_default() == current_value.0);
+        require!(
+            prev.unwrap_or_default() == current_value.0,
+            ERR_ATOMIC_UPDATE
+        );
 
         // Update allowance to new value.
         self.approvals.insert(&lookup, &value.0);
@@ -847,6 +852,66 @@ mod ws_tests {
     }
 
     // ----- END ported tests ----
+
+    #[tokio::test]
+    async fn test_approve_compare() -> anyhow::Result<()> {
+        let worker = workspaces::sandbox().await?;
+        let contract = init(&worker, U128(1000)).await?;
+
+        let spender_account: AccountId = "test.near".parse().unwrap();
+        let account_json = AccountIdOrKey::Account(spender_account.as_str().parse().unwrap());
+
+        let res = contract
+            .call("ft_approve")
+            .args_json((&account_json, "0", "100"))
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        // Invalid current value.
+        let res = contract
+            .call("ft_approve")
+            .args_json((&account_json, "0", "80"))
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res
+            .into_result()
+            .unwrap_err()
+            .to_string()
+            .contains(super::ERR_ATOMIC_UPDATE));
+
+        let allowance = contract
+            .call("ft_allowance")
+            .args_json((contract.id(), &account_json))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(allowance.0, 100);
+
+        let res = contract
+            .call("ft_approve")
+            .args_json((
+                AccountIdOrKey::Account(spender_account.as_str().parse().unwrap()),
+                "100",
+                "80",
+            ))
+            .deposit(ONE_YOCTO)
+            .transact()
+            .await?;
+        assert!(res.is_success());
+
+        let allowance = contract
+            .call("ft_allowance")
+            .args_json((contract.id(), &account_json))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(allowance.0, 80);
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_approve() -> anyhow::Result<()> {

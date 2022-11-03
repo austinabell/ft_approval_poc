@@ -244,11 +244,15 @@ impl Contract {
         // TODO actually, do we want this at all? What about the case where the approval amount
         // TODO is updated before the resolve transfer finalizes?
         // Increase approval amount by the unused amount.
+        // TODO we probably want to remove if 0 rather than updating to 0
         self.approvals.insert(&lookup, &approval_amount);
 
         if burned_amount > 0 {
             self.on_tokens_burned(lookup.0, burned_amount);
-            // TODO do we want to remove the access key if we notice the account has been deleted?
+            // TODO do we actually want to keep the allowance when we notice a deleted account/burn?
+            // Option 1: we keep the allowance
+            // Option 2: We remove only the allowance from the key/account we are resolving
+            // Option 3: Use nested maps to clear all allowances when a delete is noticed (seems like this is bad incentives)
         }
 
         U128(used_amount)
@@ -980,7 +984,6 @@ mod ws_tests {
         Ok(())
     }
 
-    // TODO is dependent on async
     #[tokio::test]
     async fn test_transfer_call_from_with_burned_amount() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
@@ -1005,7 +1008,6 @@ mod ws_tests {
             .deposit(ONE_YOCTO)
             .transact_async()
             .await?;
-
         assert!(approve_tx.status().await.is_ok());
 
         let transfer_tx = spender
@@ -1025,7 +1027,8 @@ mod ws_tests {
 
         // Unregister storage before all transfer_call_from receipts finalize
         // TODO this timeout is janky, but we don't have a way to listen to new block event.
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        // TODO this could also be removed if fast forward processed receipts, which it doesn't
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         let res = contract
             .call("storage_unregister")
             .args_json((Some(true),))
@@ -1060,10 +1063,20 @@ mod ws_tests {
             .json::<U128>()?;
         assert_eq!(defi_balance.0, transfer_amount.0 - 10);
 
+        let allowance = contract
+            .call("ft_allowance")
+            .args_json((
+                contract.id(),
+                AccountIdOrKey::Account(spender.id().as_str().parse().unwrap()),
+            ))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(allowance.0, 0);
+
         Ok(())
     }
 
-    // TODO
     #[tokio::test]
     async fn test_transfer_call_from_with_immediate_return_and_no_refund() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
@@ -1075,20 +1088,36 @@ mod ws_tests {
         // defi contract must be registered as a FT account
         register_user(&contract, defi_contract.id()).await?;
 
-        // root invests in defi by calling `ft_transfer_call`
-        let res = contract
-            .call("ft_transfer_call")
+        // TODO could use key in future, async calls are bugged in workspaces though
+        let spender = worker.dev_create_account().await?;
+
+        let approve_tx = contract
+            .call("ft_approve")
             .args_json((
+                AccountIdOrKey::Account(spender.id().as_str().parse().unwrap()),
+                "0",
+                transfer_amount,
+            ))
+            .deposit(ONE_YOCTO)
+            .transact_async()
+            .await?;
+        assert!(approve_tx.status().await.is_ok());
+
+        spender
+            .call(contract.id(), "ft_transfer_call_from_account")
+            .args_json((
+                contract.id(),
                 defi_contract.id(),
                 transfer_amount,
                 Option::<String>::None,
                 "take-my-money",
             ))
             .max_gas()
-            .deposit(ONE_YOCTO)
+            // TODO do we need the deposit for transferring from another
+            // .deposit(ONE_YOCTO)
             .transact()
-            .await?;
-        assert!(res.is_success());
+            .await?
+            .into_result()?;
 
         let root_balance = contract
             .call("ft_balance_of")
@@ -1104,6 +1133,17 @@ mod ws_tests {
             .json::<U128>()?;
         assert_eq!(initial_balance.0 - transfer_amount.0, root_balance.0);
         assert_eq!(transfer_amount.0, defi_balance.0);
+
+        let allowance = contract
+            .call("ft_allowance")
+            .args_json((
+                contract.id(),
+                AccountIdOrKey::Account(spender.id().as_str().parse().unwrap()),
+            ))
+            .view()
+            .await?
+            .json::<U128>()?;
+        assert_eq!(allowance.0, 0);
 
         Ok(())
     }

@@ -363,7 +363,7 @@ mod tests {
     fn test_new() {
         let mut context = get_context(accounts(1));
         testing_env!(context.build());
-        let contract = Contract::new_default_meta(accounts(1).into(), TOTAL_SUPPLY.into());
+        let contract = Contract::new_default_meta(accounts(1), TOTAL_SUPPLY.into());
         testing_env!(context.is_view(true).build());
         assert_eq!(contract.ft_total_supply().0, TOTAL_SUPPLY);
         assert_eq!(contract.ft_balance_of(accounts(1)).0, TOTAL_SUPPLY);
@@ -381,7 +381,7 @@ mod tests {
     fn test_transfer() {
         let mut context = get_context(accounts(2));
         testing_env!(context.build());
-        let mut contract = Contract::new_default_meta(accounts(2).into(), TOTAL_SUPPLY.into());
+        let mut contract = Contract::new_default_meta(accounts(2), TOTAL_SUPPLY.into());
         testing_env!(context
             .storage_usage(env::storage_usage())
             .attached_deposit(contract.storage_balance_bounds().min.into())
@@ -463,7 +463,7 @@ mod ws_tests {
             .await?;
         assert!(res.is_success());
 
-        return Ok(ft_contract);
+        Ok(ft_contract)
     }
 
     async fn init_defi_contract(

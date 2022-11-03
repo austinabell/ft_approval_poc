@@ -933,27 +933,21 @@ mod ws_tests {
         assert!(res.status().await.is_ok());
 
         let new_account = worker.dev_create_account().await?;
+        let new_account_json = AccountIdOrKey::Account(new_account.id().as_str().parse().unwrap());
 
         let f1 = alice
             .call(contract.id(), "ft_approve")
-            .args_json((
-                AccountIdOrKey::Account(new_account.id().as_str().parse().unwrap()),
-                "0",
-                approve_amount,
-            ))
+            .args_json((&new_account_json, "0", approve_amount))
             .deposit(ONE_YOCTO)
             .transact_async()
             .await?;
 
         let access_pk = SecretKey::from_random(KeyType::ED25519);
+        let access_pk_json = serde_json::json!({"type": "Key", "value": access_pk.public_key()});
 
         let f2 = alice
             .call(contract.id(), "ft_approve")
-            .args_json((
-                serde_json::json!({"type": "Key", "value": access_pk.public_key()}),
-                "0",
-                approve_amount,
-            ))
+            .args_json((&access_pk_json, "0", approve_amount))
             // TODO play with deposit
             .deposit(parse_near!("1 N"))
             .transact_async()
@@ -981,19 +975,13 @@ mod ws_tests {
         // Check allowance amounts
         let key_allowance = contract
             .call("ft_allowance")
-            .args_json((
-                alice.id(),
-                serde_json::json!({"type": "Key", "value": access_pk.public_key()}),
-            ))
+            .args_json((alice.id(), &access_pk_json))
             .view()
             .await?
             .json::<U128>()?;
         let account_allowance = contract
             .call("ft_allowance")
-            .args_json((
-                alice.id(),
-                AccountIdOrKey::Account(new_account.id().as_str().parse().unwrap()),
-            ))
+            .args_json((alice.id(), &new_account_json))
             .view()
             .await?
             .json::<U128>()?;
@@ -1062,14 +1050,11 @@ mod ws_tests {
 
         // TODO could use key in future, async calls are bugged in workspaces though
         let spender = worker.dev_create_account().await?;
+        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
 
         let approve_tx = contract
             .call("ft_approve")
-            .args_json((
-                AccountIdOrKey::Account(spender.id().as_str().parse().unwrap()),
-                "0",
-                transfer_amount,
-            ))
+            .args_json((&spender_json, "0", transfer_amount))
             .deposit(ONE_YOCTO)
             .transact_async()
             .await?;
@@ -1130,10 +1115,7 @@ mod ws_tests {
 
         let allowance = contract
             .call("ft_allowance")
-            .args_json((
-                contract.id(),
-                AccountIdOrKey::Account(spender.id().as_str().parse().unwrap()),
-            ))
+            .args_json((contract.id(), &spender_json))
             .view()
             .await?
             .json::<U128>()?;
@@ -1155,14 +1137,11 @@ mod ws_tests {
 
         // TODO could use key in future, async calls are bugged in workspaces though
         let spender = worker.dev_create_account().await?;
+        let spender_json = AccountIdOrKey::Account(spender.id().as_str().parse().unwrap());
 
         let approve_tx = contract
             .call("ft_approve")
-            .args_json((
-                AccountIdOrKey::Account(spender.id().as_str().parse().unwrap()),
-                "0",
-                transfer_amount,
-            ))
+            .args_json((&spender_json, "0", transfer_amount))
             .deposit(ONE_YOCTO)
             .transact_async()
             .await?;
@@ -1201,10 +1180,7 @@ mod ws_tests {
 
         let allowance = contract
             .call("ft_allowance")
-            .args_json((
-                contract.id(),
-                AccountIdOrKey::Account(spender.id().as_str().parse().unwrap()),
-            ))
+            .args_json((contract.id(), &spender_json))
             .view()
             .await?
             .json::<U128>()?;

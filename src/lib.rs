@@ -89,6 +89,7 @@ impl Contract {
 
     // ---- Approval standard -----
 
+    // TODO(spec): do we want to have value use `u128::MAX` as special value as "unlimited"?
     /// Approve the passed address to spend the specified amount of tokens on behalf of
     /// `env::predecessor_account_id`.
     ///
@@ -138,18 +139,16 @@ impl Contract {
         // TODO(spec) emit approval event. Do we want to match Eth's owner, spender, value pattern?
     }
 
-    // // TODO docs
-    // pub fn ft_approve_key(
-    //     &mut self,
-    //     key: PublicKey,
-    //     allowance: U128,
-    //     current_value: U128,
-    //     value: U128,
-    // ) {
-    // }
-
-    // TODO see if a way to avoid requiring multiple fns
-    // TODO docs
+    // TODO(spec) see if a way to avoid requiring multiple fns for account and key transfer.
+    /// Moves `amount` tokens from `from` to `to` using the
+    /// allowance mechanism. `amount` is then deducted from the caller's
+    /// allowance.
+    ///
+    /// Arguments:
+    /// * `from` The address which will spend the funds.
+    /// * `to` The address that will receive the funds.
+    /// * `amount` The amount of tokens to be spent.
+    /// * `memo` (optional) Note about the transfer.
     pub fn ft_transfer_from_account(
         &mut self,
         from: AccountId,

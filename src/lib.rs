@@ -411,6 +411,8 @@ mod tests {
         assert_eq!(contract.ft_balance_of(accounts(1)).0, transfer_amount);
     }
 
+    // -- APPROVE SPECIFIC TESTS --
+
     #[test]
     fn account_or_key_serialization() {
         let acc = AccountOrKey::Account("test.near".parse().unwrap());
@@ -929,7 +931,7 @@ mod ws_tests {
     }
 
     #[tokio::test]
-    async fn test_approve() -> anyhow::Result<()> {
+    async fn test_approve_basic() -> anyhow::Result<()> {
         let initial_balance = U128(10000);
         let alice_amount = U128(100);
         let approve_amount = U128(50);
@@ -958,7 +960,7 @@ mod ws_tests {
             .await?;
 
         let access_pk = SecretKey::from_random(KeyType::ED25519);
-        let access_pk_json = serde_json::json!({"type": "Key", "value": access_pk.public_key()});
+        let access_pk_json = serde_json::json!({"key": access_pk.public_key()});
 
         let f2 = alice
             .call(contract.id(), "ft_approve")
@@ -1160,6 +1162,7 @@ mod ws_tests {
         register_user(&contract, defi_contract.id()).await?;
 
         // TODO could use key in future, async calls are bugged in workspaces though
+        // https://github.com/near/workspaces-rs/issues/228
         let spender = worker.dev_create_account().await?;
         let spender_json = AccountOrKey::Account(spender.id().as_str().parse().unwrap());
 
